@@ -8,8 +8,60 @@ import { createSpinner } from "./spinner.js";
 import { confirmCommands } from "./tui.js";
 
 interface WorktreeSetupData {
-    "setup-worktree"?: string[];
+    "setup-worktree"?: string[] | string;
+    "setup-worktree-unix"?: string[] | string;
+    "setup-worktree-windows"?: string[] | string;
     [key: string]: unknown;
+}
+
+/**
+ * Determine if we're running on a Unix-like system
+ */
+export function isUnix(): boolean {
+    return process.platform !== 'win32';
+}
+
+/**
+ * Resolve setup commands from a value that can be either:
+ * - An array of shell commands
+ * - A filepath to a script (relative to .cursor/ directory)
+ */
+export function resolveSetupValue(
+    value: string[] | string,
+    repoRoot: string
+): string[] {
+    if (Array.isArray(value)) {
+        return value;
+    }
+    // Single string = script filepath relative to .cursor/ directory
+    const scriptPath = join(repoRoot, '.cursor', value);
+    return [scriptPath];
+}
+
+/**
+ * Extract commands from parsed worktrees.json data with OS-specific priority
+ */
+export function extractCommands(
+    data: WorktreeSetupData | string[],
+    repoRoot: string
+): string[] {
+    // Handle plain array format (Cursor's legacy format)
+    if (Array.isArray(data)) {
+        return data;
+    }
+
+    // Priority: OS-specific key > generic key
+    const osKey = isUnix() ? 'setup-worktree-unix' : 'setup-worktree-windows';
+
+    if (data[osKey] !== undefined) {
+        return resolveSetupValue(data[osKey], repoRoot);
+    }
+
+    if (data['setup-worktree'] !== undefined) {
+        return resolveSetupValue(data['setup-worktree'], repoRoot);
+    }
+
+    return [];
 }
 
 /**
@@ -23,13 +75,7 @@ async function loadSetupCommands(repoRoot: string): Promise<{ commands: string[]
         const content = await readFile(cursorSetupPath, "utf-8");
         const data = JSON.parse(content) as WorktreeSetupData | string[];
 
-        let commands: string[] = [];
-        if (Array.isArray(data)) {
-            commands = data;
-        } else if (data && typeof data === 'object' && Array.isArray(data["setup-worktree"])) {
-            commands = data["setup-worktree"];
-        }
-
+        const commands = extractCommands(data, repoRoot);
         if (commands.length > 0) {
             return { commands, filePath: cursorSetupPath };
         }
@@ -37,20 +83,14 @@ async function loadSetupCommands(repoRoot: string): Promise<{ commands: string[]
         // Not found, try fallback
     }
 
-    // Check for worktrees.json
+    // Check for worktrees.json at repo root
     const fallbackSetupPath = join(repoRoot, "worktrees.json");
     try {
         await stat(fallbackSetupPath);
         const content = await readFile(fallbackSetupPath, "utf-8");
         const data = JSON.parse(content) as WorktreeSetupData | string[];
 
-        let commands: string[] = [];
-        if (Array.isArray(data)) {
-            commands = data;
-        } else if (data && typeof data === 'object' && Array.isArray(data["setup-worktree"])) {
-            commands = data["setup-worktree"];
-        }
-
+        const commands = extractCommands(data, repoRoot);
         if (commands.length > 0) {
             return { commands, filePath: fallbackSetupPath };
         }
@@ -143,7 +183,6 @@ export async function runSetupScripts(worktreePath: string): Promise<boolean> {
     }
 
     let setupFilePath: string | null = null;
-    let setupData: WorktreeSetupData | string[] | null = null;
 
     // Check for Cursor's worktrees.json first
     const cursorSetupPath = join(repoRoot, ".cursor", "worktrees.json");
@@ -151,7 +190,7 @@ export async function runSetupScripts(worktreePath: string): Promise<boolean> {
         await stat(cursorSetupPath);
         setupFilePath = cursorSetupPath;
     } catch {
-        // Check for worktrees.json
+        // Check for worktrees.json at repo root
         const fallbackSetupPath = join(repoRoot, "worktrees.json");
         try {
             await stat(fallbackSetupPath);
@@ -169,15 +208,9 @@ export async function runSetupScripts(worktreePath: string): Promise<boolean> {
     try {
         console.log(chalk.blue(`Found setup file: ${setupFilePath}, executing setup commands...`));
         const setupContent = await readFile(setupFilePath, "utf-8");
-        setupData = JSON.parse(setupContent);
+        const setupData = JSON.parse(setupContent) as WorktreeSetupData | string[];
 
-        let commands: string[] = [];
-        if (setupData && typeof setupData === 'object' && !Array.isArray(setupData) && Array.isArray(setupData["setup-worktree"])) {
-            commands = setupData["setup-worktree"];
-        } else if (setupFilePath.includes("worktrees.json") && Array.isArray(setupData)) {
-            // Handle Cursor's format if it's just an array
-            commands = setupData;
-        }
+        const commands = extractCommands(setupData, repoRoot);
 
         if (commands.length === 0) {
             console.warn(chalk.yellow(`${setupFilePath} does not contain valid setup commands.`));
